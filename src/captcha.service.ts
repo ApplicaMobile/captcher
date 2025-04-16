@@ -1,20 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import * as puppeteer from 'puppeteer';
-
-interface FormInputDto {
-  region: string;
-  comuna: string;
-  manzana: string;
-  predio: string;
-  primeravez?: string;
-  COMUCON?: string;
-  OPCION?: string;
-  AMB?: string;
-}
+import { FormInputDto, SessionData } from './types';
 
 @Injectable()
 export class CaptchaService {
-  private sessionStore = new Map<string, { captchaUrl: string }>();
+  private sessions: SessionData[] = [];
 
   async processForm(input: FormInputDto) {
     const browser = await puppeteer.launch({ headless: true });
@@ -51,33 +41,73 @@ export class CaptchaService {
     // Etapa 2: Esperar que la nueva página cargue y obtener el captcha
     console.log('Etapa 2: Esperando página del captcha...');
 
-    // Intentar con diferentes selectores
     try {
       await page.waitForSelector('#imgcapt', {
         visible: true,
         timeout: 5000,
       });
 
-      // Capturar el captcha y session_id
+      // Capturar el captcha
       const captchaSrc = await page.$eval(
         '#imgcapt',
         (img: HTMLImageElement) => img.src,
       );
-      const cookies = await page.cookies();
-      const sessionCookie = cookies.find((c) => c.name === 'session_id');
 
-      const sessionId = sessionCookie?.value ?? '';
-      this.sessionStore.set(sessionId, { captchaUrl: captchaSrc });
+      // Descargar la imagen y convertirla a base64
+      const imageBuffer = await page.evaluate(async (src) => {
+        const response = await fetch(src);
+        const buffer = await response.arrayBuffer();
+        return Array.from(new Uint8Array(buffer));
+      }, captchaSrc);
 
-      await browser.close();
+      const base64Captcha = Buffer.from(imageBuffer).toString('base64');
+
+      // Generar un ID único para la sesión
+      const sessionId = Math.random().toString(36).substring(2, 15);
+
+      // Crear y almacenar la sesión en el array
+      const sessionData: SessionData = {
+        sessionId,
+        captchaUrl: captchaSrc,
+        captchaBase64: base64Captcha,
+        browser,
+        page,
+        createdAt: new Date(),
+      };
+      this.sessions.push(sessionData);
 
       return {
         sessionId,
         captcha: captchaSrc,
+        captchaBase64: base64Captcha,
       };
     } catch (error) {
       console.error('Error al buscar el captcha:', error);
+      await browser.close();
       throw error;
     }
+  }
+
+  getSessionData(sessionId: string) {
+    const session = this.sessions.find((s) => s.sessionId === sessionId);
+    if (!session) {
+      throw new NotFoundException('Sesión no encontrada');
+    }
+    return {
+      captcha: session.captchaUrl,
+      captchaBase64: session.captchaBase64,
+    };
+  }
+
+  private cleanupOldSessions() {
+    const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutos
+    const now = new Date();
+    this.sessions = this.sessions.filter((session) => {
+      if (now.getTime() - session.createdAt.getTime() > SESSION_TIMEOUT) {
+        session.browser.close();
+        return false;
+      }
+      return true;
+    });
   }
 }

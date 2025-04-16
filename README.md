@@ -27,25 +27,30 @@ npm install
 
 ```bash
 npm run start:dev
-npm run start:debug
 ```
 
 ## Uso
 
 ### Endpoints
 
-#### 1. Obtener Captcha
+#### 1. Obtener Nuevo Captcha
 
 ```http
-POST http://localhost:3000/captcha/submit
+POST /captcha/submit
 Content-Type: application/json
 
 {
-    "region": "06",
-    "comuna": "06101",
-    "manzana": "500",
-    "predio": "295",
+    "region": "13",
+    "comuna": "13101",
+    "manzana": "12345",
+    "predio": "67890"
 }
+```
+
+#### 2. Recuperar Captcha por SessionID
+
+```http
+GET /captcha/session/{sessionId}
 ```
 
 ### Ejemplos de Postman
@@ -53,7 +58,7 @@ Content-Type: application/json
 #### Región Metropolitana (13)
 
 ```http
-POST http://localhost:3000/captcha/submit
+POST /captcha/submit
 Content-Type: application/json
 
 {
@@ -67,7 +72,7 @@ Content-Type: application/json
 #### Región de Valparaíso (05)
 
 ```http
-POST http://localhost:3000/captcha/submit
+POST /captcha/submit
 Content-Type: application/json
 
 {
@@ -81,7 +86,7 @@ Content-Type: application/json
 #### Región de O'Higgins - Rancagua (06)
 
 ```http
-POST http://localhost:3000/captcha/submit
+POST /captcha/submit
 Content-Type: application/json
 
 {
@@ -113,14 +118,24 @@ Content-Type: application/json
 - Talca: 07101
 - Concepción: 08101
 
-## Respuesta del Servicio
+## Respuestas del Servicio
 
-La respuesta incluirá:
+### Nuevo Captcha (POST /captcha/submit)
 
 ```json
 {
   "sessionId": "string",
-  "captcha": "data:image/png;base64,..."
+  "captcha": "url_string",
+  "captchaBase64": "base64_string"
+}
+```
+
+### Recuperar Captcha (GET /captcha/session/{sessionId})
+
+```json
+{
+  "captcha": "url_string",
+  "captchaBase64": "base64_string"
 }
 ```
 
@@ -132,6 +147,11 @@ Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
 PORT=3000
 ```
 
-## Licencia
+## Scripts Disponibles
+
+- `npm run start`: Inicia el servidor en producción
+- `npm run start:dev`: Inicia el servidor en modo desarrollo
+- `npm run test`: Ejecuta los tests
+- `npm run build`: Compila el proyecto
 
 Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
