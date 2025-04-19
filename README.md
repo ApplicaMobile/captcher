@@ -31,7 +31,54 @@ npm run start:dev
 
 ## Uso
 
-### Endpoints
+### Flujo Completo de Ejemplo (Rancagua)
+
+#### 1. Obtener Captcha
+
+```http
+POST /captcha/submit
+Content-Type: application/json
+
+{
+    "region": "06",
+    "comuna": "06101",
+    "manzana": "500",
+    "predio": "295"
+}
+```
+
+Respuesta:
+
+```json
+{
+  "sessionId": "abc123",
+  "captcha": "url_string",
+  "captchaBase64": "base64_string"
+}
+```
+
+#### 2. Enviar Captcha y Obtener PDF
+
+```http
+POST /captcha/pdf
+Content-Type: application/json
+
+{
+    "sessionId": "abc123",
+    "captchaValue": "TEXTO_DEL_CAPTCHA"
+}
+```
+
+Respuesta:
+
+```json
+{
+  "pdf": "base64_string",
+  "contentType": "application/pdf"
+}
+```
+
+### Endpoints Disponibles
 
 #### 1. Obtener Nuevo Captcha
 
@@ -53,47 +100,15 @@ Content-Type: application/json
 GET /captcha/session/{sessionId}
 ```
 
-### Ejemplos de Postman
-
-#### Región Metropolitana (13)
+#### 3. Obtener PDF
 
 ```http
-POST /captcha/submit
+POST /captcha/pdf
 Content-Type: application/json
 
 {
-    "region": "13",
-    "comuna": "13101",
-    "manzana": "12345",
-    "predio": "67890"
-}
-```
-
-#### Región de Valparaíso (05)
-
-```http
-POST /captcha/submit
-Content-Type: application/json
-
-{
-    "region": "05",
-    "comuna": "05101",
-    "manzana": "12345",
-    "predio": "67890"
-}
-```
-
-#### Región de O'Higgins - Rancagua (06)
-
-```http
-POST /captcha/submit
-Content-Type: application/json
-
-{
-    "region": "06",
-    "comuna": "06101",
-    "manzana": "500",
-    "predio": "295"
+    "sessionId": "string",
+    "captchaValue": "string"
 }
 ```
 
@@ -139,6 +154,15 @@ Content-Type: application/json
 }
 ```
 
+### Obtener PDF (POST /captcha/pdf)
+
+```json
+{
+  "pdf": "base64_string",
+  "contentType": "application/pdf"
+}
+```
+
 ## Variables de Entorno
 
 Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
@@ -153,5 +177,15 @@ PORT=3000
 - `npm run start:dev`: Inicia el servidor en modo desarrollo
 - `npm run test`: Ejecuta los tests
 - `npm run build`: Compila el proyecto
+
+## Contribución
+
+1. Fork el proyecto
+2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
+3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abre un Pull Request
+
+## Licencia
 
 Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.

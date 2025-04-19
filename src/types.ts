@@ -15,3 +15,8 @@ export interface SessionData {
   page: puppeteer.Page;
   createdAt: Date;
 }
+
+export interface SubmitCaptchaDto {
+  sessionId: string;
+  captchaValue: string;
+}

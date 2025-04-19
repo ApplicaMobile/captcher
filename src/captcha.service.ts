@@ -1,10 +1,23 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import * as puppeteer from 'puppeteer';
-import { FormInputDto, SessionData } from './types';
+import { FormInputDto, SessionData, SubmitCaptchaDto } from './types';
+import { Logger } from '@nestjs/common';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class CaptchaService {
   private sessions: SessionData[] = [];
+  private readonly SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+  private readonly logger = new Logger(CaptchaService.name);
+  private readonly PDF_DIR = path.join(process.cwd(), 'pdfs');
+
+  constructor() {
+    // Crear el directorio de PDFs si no existe
+    if (!fs.existsSync(this.PDF_DIR)) {
+      fs.mkdirSync(this.PDF_DIR);
+    }
+  }
 
   async processForm(input: FormInputDto) {
     const browser = await puppeteer.launch({ headless: true });
@@ -25,7 +38,7 @@ export class CaptchaService {
     await Promise.all([
       page.waitForNavigation({
         waitUntil: 'networkidle0',
-        timeout: 10000,
+        timeout: 15000,
       }),
       page.click('input[name="button"][onclick="FormCheck(formrol)"]'),
     ]);
@@ -35,8 +48,8 @@ export class CaptchaService {
     console.log('URL actual después de la redirección:', currentUrl2);
 
     // Verificar el contenido de la página
-    const pageContent = await page.content();
-    console.log('Contenido de la página:', pageContent);
+    // const pageContent = await page.content();
+    // console.log('Contenido de la página:', pageContent);
 
     // Etapa 2: Esperar que la nueva página cargue y obtener el captcha
     console.log('Etapa 2: Esperando página del captcha...');
@@ -44,7 +57,7 @@ export class CaptchaService {
     try {
       await page.waitForSelector('#imgcapt', {
         visible: true,
-        timeout: 5000,
+        timeout: 10000,
       });
 
       // Capturar el captcha
@@ -76,6 +89,8 @@ export class CaptchaService {
       };
       this.sessions.push(sessionData);
 
+      console.log('Etapa 3: Fin.');
+
       return {
         sessionId,
         captcha: captchaSrc,
@@ -88,26 +103,122 @@ export class CaptchaService {
     }
   }
 
-  getSessionData(sessionId: string) {
-    const session = this.sessions.find((s) => s.sessionId === sessionId);
-    if (!session) {
-      throw new NotFoundException('Sesión no encontrada');
-    }
-    return {
-      captcha: session.captchaUrl,
-      captchaBase64: session.captchaBase64,
-    };
+  getSessionData(sessionId: string): SessionData | undefined {
+    return this.sessions.find((session) => session.sessionId === sessionId);
   }
 
-  private cleanupOldSessions() {
-    const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutos
-    const now = new Date();
-    this.sessions = this.sessions.filter((session) => {
-      if (now.getTime() - session.createdAt.getTime() > SESSION_TIMEOUT) {
-        session.browser.close();
-        return false;
+  async submitCaptchaAndGetPDF(dto: SubmitCaptchaDto): Promise<Buffer> {
+    
+    const session = this.getSessionData(dto.sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    try {
+      this.logger.log('Starting PDF generation process...');
+      // Input captcha value
+      this.logger.log('Typing captcha value...');
+      await session.page.type('input[name="txt_code"]', dto.captchaValue);
+      this.logger.log('Captcha value typed successfully');
+
+      // Configurar el listener para la ventana emergente antes de hacer clic
+      const popupPromise = new Promise<Buffer>((resolve, reject) => {
+        const popupHandler = (popup: puppeteer.Page | null) => {
+          void (async () => {
+            if (!popup) {
+              this.logger.error('Popup window failed to open');
+              reject(new Error('Failed to open popup window'));
+              return;
+            }
+
+            try {
+              this.logger.log('Waiting for popup to load...');
+              await popup.waitForFunction(
+                () => {
+                  return document.readyState === 'complete';
+                },
+                { timeout: 30000 },
+              );
+              this.logger.log('Popup loaded successfully');
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+
+              // Verificar si hay un mensaje de error
+              const errorMessage = await popup.evaluate(() => {
+                const errorElement = document.querySelector('.error-message');
+                return errorElement ? errorElement.textContent : null;
+              });
+
+              if (errorMessage) {
+                this.logger.error(`Error message found: ${errorMessage}`);
+                throw new Error(`SII Error: ${errorMessage}`);
+              }
+
+              this.logger.log('Generating PDF from popup...');
+              const pdfData = await popup.pdf({
+                format: 'A4',
+                printBackground: true,
+              });
+              // Guardar el PDF en el sistema de archivos
+              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+              const filename = `certificado_${timestamp}.pdf`;
+              const filepath = path.join(this.PDF_DIR, filename);
+              fs.writeFileSync(filepath, pdfData);
+              this.logger.log(`PDF saved to: ${filepath}`);
+              // Log del tamaño del PDF
+              this.logger.log(`PDF size: ${pdfData.length} bytes`);
+
+              this.logger.log('PDF generated successfully');
+
+              resolve(Buffer.from(pdfData));
+            } catch (error) {
+              this.logger.error('Error in popup handler:', error);
+              reject(error instanceof Error ? error : new Error(String(error)));
+            } finally {
+              this.logger.log('Closing popup window...');
+              await popup.close();
+            }
+          })();
+        };
+
+        session.page.once('popup', popupHandler);
+      });
+
+      // Hacer clic en el botón
+      this.logger.log('Clicking submit button...');
+      await session.page.click('input[name="b1"]');
+      this.logger.log('Submit button clicked successfully');
+
+      // Esperar a que se complete la operación
+      this.logger.log('Waiting for PDF generation to complete...');
+      const pdfBuffer = await popupPromise;
+      this.logger.log('PDF generation completed successfully');
+
+      // Limpiar la sesión
+      this.logger.log('Cleaning up session...');
+      // await this.cleanupSession(session.sessionId);
+      this.logger.log('Session cleaned up successfully');
+
+      return pdfBuffer;
+    } catch (error) {
+      this.logger.error('Error in PDF generation process:', error);
+      if (session) {
+        await this.cleanupSession(session.sessionId);
       }
-      return true;
-    });
+      throw new Error(
+        `Failed to get PDF: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  }
+
+  private async cleanupSession(sessionId: string): Promise<void> {
+    const session = this.getSessionData(sessionId);
+    if (session) {
+      try {
+        await session.browser.close();
+      } catch (error) {
+        this.logger.error('Error closing browser:', error);
+      }
+      this.sessions = this.sessions.filter((s) => s.sessionId !== sessionId);
+    }
   }
 }
