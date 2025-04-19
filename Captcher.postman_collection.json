@@ -1,0 +1,89 @@
+{
+	"info": {
+		"_postman_id": "573e08ff-5982-4d0b-8e0b-99d203468b0a",
+		"name": "Captcher",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "29745910"
+	},
+	"item": [
+		{
+			"name": "Captcha Submit",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"region\": \"06\",\n    \"comuna\": \"06101\",\n    \"manzana\": \"500\",\n    \"predio\": \"295\"\n}   ",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:3000/captcha/submit",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"captcha",
+						"submit"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Captcha Session :id",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:3000/captcha/session/1v3gny3x3wq",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"captcha",
+						"session",
+						"1v3gny3x3wq"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Captcha PDF",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"sessionId\": \"wq7dceyq1b\",\n    \"captchaValue\": \"5544\"\n}   ",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://localhost:3000/captcha/pdf",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "3000",
+					"path": [
+						"captcha",
+						"pdf"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}
