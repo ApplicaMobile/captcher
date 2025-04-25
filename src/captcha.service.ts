@@ -20,8 +20,23 @@ export class CaptchaService {
   }
 
   async processForm(input: FormInputDto) {
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--window-size=1920x1080',
+      ],
+      protocolTimeout: 30000, // Aumentar el timeout a 30 segundos
+    });
     const page = await browser.newPage();
+
+    // Configurar timeouts de navegación
+    page.setDefaultNavigationTimeout(30000);
+    page.setDefaultTimeout(30000);
 
     await page.goto('https://zeus.sii.cl/avalu_cgi/br/brc110.sh');
     const currentUrl1 = page.url();
@@ -108,7 +123,6 @@ export class CaptchaService {
   }
 
   async submitCaptchaAndGetPDF(dto: SubmitCaptchaDto): Promise<Buffer> {
-    
     const session = this.getSessionData(dto.sessionId);
     if (!session) {
       throw new Error('Session not found');
@@ -132,6 +146,10 @@ export class CaptchaService {
             }
 
             try {
+              // Configurar timeouts para la ventana emergente
+              popup.setDefaultNavigationTimeout(30000);
+              popup.setDefaultTimeout(30000);
+
               this.logger.log('Waiting for popup to load...');
               await popup.waitForFunction(
                 () => {
@@ -153,10 +171,76 @@ export class CaptchaService {
                 throw new Error(`SII Error: ${errorMessage}`);
               }
 
-              this.logger.log('Generating PDF from popup...');
+              // Nueva estrategia para capturar todo el contenido
+              this.logger.log('Preparing page for PDF generation...');
+              // 1. Ajustar el contenido de la página para mejor captura
+              await popup.evaluate(() => {
+                // Eliminar restricciones de tamaño y scroll
+                document.body.style.overflow = 'visible';
+                document.body.style.maxWidth = 'none';
+                document.body.style.width = 'auto';
+                // Ajustar todas las tablas para que muestren su contenido completo
+                const tables = document.getElementsByTagName('table');
+                for (const table of tables) {
+                  table.style.width = 'auto';
+                  table.style.maxWidth = 'none';
+                  table.style.tableLayout = 'auto';
+                }
+                // Asegurar que las celdas no se corten
+                const cells = document.getElementsByTagName('td');
+                for (const cell of cells) {
+                  cell.style.whiteSpace = 'normal';
+                  cell.style.width = 'auto';
+                }
+              });
+
+              // 2. Esperar a que los cambios se apliquen
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+
+              // 3. Obtener las dimensiones reales del contenido
+              const dimensions = await popup.evaluate(() => {
+                const body = document.body;
+                const html = document.documentElement;
+
+                return {
+                  width: Math.max(
+                    body.scrollWidth,
+                    body.offsetWidth,
+                    html.clientWidth,
+                    html.scrollWidth,
+                    html.offsetWidth,
+                  ),
+                  height: Math.max(
+                    body.scrollHeight,
+                    body.offsetHeight,
+                    html.clientHeight,
+                    html.scrollHeight,
+                    html.offsetHeight,
+                  ),
+                };
+              });
+
+              // 4. Configurar viewport con las dimensiones obtenidas
+              await popup.setViewport({
+                width: dimensions.width,
+                height: dimensions.height,
+                deviceScaleFactor: 1,
+              });
+
+              this.logger.log('Generating PDF with optimized settings...');
               const pdfData = await popup.pdf({
-                format: 'A4',
                 printBackground: true,
+                margin: {
+                  top: '10mm',
+                  right: '10mm',
+                  bottom: '10mm',
+                  left: '10mm',
+                },
+                width: `${dimensions.width + 20}px`, // Agregar un pequeño margen
+                height: `${dimensions.height + 20}px`,
+                scale: 0.95, // Ligera reducción para asegurar que todo quepa
+                displayHeaderFooter: false,
+                preferCSSPageSize: false,
               });
               // Guardar el PDF en el sistema de archivos
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -164,7 +248,6 @@ export class CaptchaService {
               const filepath = path.join(this.PDF_DIR, filename);
               fs.writeFileSync(filepath, pdfData);
               this.logger.log(`PDF saved to: ${filepath}`);
-              // Log del tamaño del PDF
               this.logger.log(`PDF size: ${pdfData.length} bytes`);
 
               this.logger.log('PDF generated successfully');
