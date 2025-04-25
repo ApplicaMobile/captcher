@@ -194,6 +194,7 @@ Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
 
 ```env
 PORT=3000
+OPENAI_API_KEY=tu_api_key_de_openai  # Requerido para la funcionalidad de auto-submit
 ```
 
 ## Scripts Disponibles
