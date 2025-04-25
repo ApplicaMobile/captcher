@@ -1,0 +1,114 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+// frontend.mdc
+
+@purpose: Crear un servicio automatizado con NestJS y Puppeteer que complete y envíe formularios en el sitio https://zeus.sii.cl/avalu_cgi/br/brc110.sh, incluyendo la captura y resolución del captcha.
+
+@stack: NestJS, Puppeteer, TypeScript, 2Captcha API
+
+@entrypoint: src/main.ts
+
+@directories:
+- src/sii/sii.controller.ts
+- src/sii/sii.service.ts
+- src/sii/sii.module.ts
+- src/app.module.ts
+- src/main.ts
+- test/sii.e2e-spec.ts
+- src/sii/sii.helper.ts
+
+@env:
+- puppeteer necesita permisos para ejecutar Chrome headless
+- API_KEY para el servicio de resolución de captcha (2Captcha)
+
+@routes:
+POST /sii/formulario
+  - patente: string
+  - rut: string
+  => devuelve captcha como imagen base64
+
+POST /sii/enviar
+  - patente: string
+  - rut: string
+  - captcha: string
+  => realiza el envío del formulario con el captcha resuelto
+
+@notes:
+- Capturar imagen de captcha usando page.$('img[src*="captcha"]')
+- Captcha puede resolverse manualmente o usando la API de 2Captcha
+- La segunda ruta envía el formulario completo y devuelve el HTML resultante o un resumen del contenido
+
+@todo:
+- Integrar flujo completo de resolución con 2Captcha (opcional)
+- Procesar HTML de resultado para extraer valores clave del certificado
+
+@tests:
+- Verifica que se recibe un captcha en base64 al enviar patente y rut
+- Verifica que Puppeteer lanza correctamente y navega al sitio
+- Simula un envío con captcha resuelto y verifica contenido esperado
+
+@files:
+// src/sii/sii.helper.ts
+import axios from 'axios';
+
+export async function resolverCaptcha2Captcha(apiKey: string, base64Image: string): Promise<string> {
+  const formData = new URLSearchParams();
+  formData.append('method', 'base64');
+  formData.append('key', apiKey);
+  formData.append('body', base64Image);
+  formData.append('json', '1');
+
+  const { data } = await axios.post('http://2captcha.com/in.php', formData);
+  if (data.status !== 1) throw new Error('Error enviando captcha');
+
+  const captchaId = data.request;
+  let solved = '';
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const res = await axios.get(`http://2captcha.com/res.php?key=${apiKey}&action=get&id=${captchaId}&json=1`);
+    if (res.data.status === 1) {
+      solved = res.data.request;
+      break;
+    }
+  }
+  if (!solved) throw new Error('Captcha no resuelto');
+  return solved;
+}
+
+// src/sii/sii.service.ts (extensión)
+async enviarFormulario(patente: string, rut: string, captcha: string) {
+  const browser = await puppeteer.launch({ headless: 'new' });
+  const page = await browser.newPage();
+
+  await page.goto('https://zeus.sii.cl/avalu_cgi/br/brc110.sh', {
+    waitUntil: 'networkidle2',
+  });
+
+  await page.type('input[name="patente"]', patente);
+  await page.type('input[name="rut"]', rut);
+  await page.type('input[name="codigo"]', captcha);
+
+  await Promise.all([
+    page.click('input[type="submit"]'),
+    page.waitForNavigation({ waitUntil: 'networkidle2' })
+  ]);
+
+  const content = await page.content();
+  await browser.close();
+
+  return {
+    message: 'Formulario enviado correctamente.',
+    resultadoHTML: content,
+  };
+}
+
+// src/sii/sii.controller.ts (extensión)
+@Post('enviar')
+async enviarFormulario(@Body() body: { patente: string; rut: string; captcha: string }) {
+  return this.siiService.enviarFormulario(body.patente, body.rut, body.captcha);
+}
+
+@end

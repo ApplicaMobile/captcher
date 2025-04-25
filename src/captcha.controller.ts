@@ -24,4 +24,26 @@ export class CaptchaController {
       contentType: 'application/pdf',
     };
   }
+
+  @Post('auto-submit')
+  async autoSubmitForm(@Body() body: FormInputDto) {
+    // 1. Obtener el CAPTCHA
+    const captchaResult = await this.captchaService.processForm(body);
+
+    // 2. Interpretar el CAPTCHA con ChatGPT
+    const captchaValue = await this.captchaService.interpretCaptchaWithGPT(
+      captchaResult.captchaBase64,
+    );
+
+    // 3. Enviar el formulario con el valor interpretado
+    const pdfBuffer = await this.captchaService.submitCaptchaAndGetPDF({
+      sessionId: captchaResult.sessionId,
+      captchaValue: captchaValue,
+    });
+
+    return {
+      pdf: pdfBuffer.toString('base64'),
+      contentType: 'application/pdf',
+    };
+  }
 }

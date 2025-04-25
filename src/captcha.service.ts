@@ -4,6 +4,8 @@ import { FormInputDto, SessionData, SubmitCaptchaDto } from './types';
 import { Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
+import OpenAI from 'openai';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class CaptchaService {
@@ -11,12 +13,18 @@ export class CaptchaService {
   private readonly SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
   private readonly logger = new Logger(CaptchaService.name);
   private readonly PDF_DIR = path.join(process.cwd(), 'pdfs');
+  private readonly openai: OpenAI;
 
-  constructor() {
+  constructor(private configService: ConfigService) {
     // Crear el directorio de PDFs si no existe
     if (!fs.existsSync(this.PDF_DIR)) {
       fs.mkdirSync(this.PDF_DIR);
     }
+
+    // Inicializar OpenAI
+    this.openai = new OpenAI({
+      apiKey: this.configService.get<string>('OPENAI_API_KEY'),
+    });
   }
 
   async processForm(input: FormInputDto) {
@@ -50,13 +58,19 @@ export class CaptchaService {
 
     // Etapa 1: Enviar el formulario y esperar la redirección
     console.log('Etapa 1: Enviando formulario...');
-    await Promise.all([
-      page.waitForNavigation({
-        waitUntil: 'networkidle0',
-        timeout: 15000,
-      }),
-      page.click('input[name="button"][onclick="FormCheck(formrol)"]'),
-    ]);
+    try {
+      await Promise.all([
+        page.waitForNavigation({
+          waitUntil: 'networkidle0',
+          timeout: 30000, // Increased from 15000 to 30000
+        }),
+        page.click('input[name="button"][onclick="FormCheck(formrol)"]'),
+      ]);
+    } catch (error) {
+      this.logger.error('Error during form submission:', error);
+      await browser.close();
+      throw new Error(`Form submission failed: ${error.message}`);
+    }
 
     // Verificar la URL actual
     const currentUrl2 = page.url();
@@ -70,16 +84,36 @@ export class CaptchaService {
     console.log('Etapa 2: Esperando página del captcha...');
 
     try {
-      await page.waitForSelector('#imgcapt', {
-        visible: true,
-        timeout: 10000,
+      // Verificar que estamos en la página correcta
+      if (!currentUrl2.includes('brc201.sh')) {
+        throw new Error(`Unexpected URL after form submission: ${currentUrl2}`);
+      }
+
+      // Esperar a que la página se cargue completamente
+      await page.waitForFunction(() => document.readyState === 'complete', {
+        timeout: 30000,
       });
+
+      // Intentar localizar el captcha con un timeout más largo
+      const captchaElement = await page.waitForSelector('#imgcapt', {
+        visible: true,
+        timeout: 30000,
+      });
+
+      if (!captchaElement) {
+        throw new Error('Captcha element not found after page load');
+      }
 
       // Capturar el captcha
       const captchaSrc = await page.$eval(
         '#imgcapt',
         (img: HTMLImageElement) => img.src,
       );
+
+      // Verificar que tenemos una URL válida del captcha
+      if (!captchaSrc) {
+        throw new Error('Failed to get captcha image source');
+      }
 
       // Descargar la imagen y convertirla a base64
       const imageBuffer = await page.evaluate(async (src) => {
@@ -302,6 +336,45 @@ export class CaptchaService {
         this.logger.error('Error closing browser:', error);
       }
       this.sessions = this.sessions.filter((s) => s.sessionId !== sessionId);
+    }
+  }
+
+  async interpretCaptchaWithGPT(base64Image: string): Promise<string> {
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Por favor, interpreta esta imagen de CAPTCHA y devuelve SOLO los 4 dígitos numéricos que ves en ella. Responde ÚNICAMENTE con los números, sin texto adicional.',
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:image/jpeg;base64,${base64Image}`,
+                },
+              },
+            ],
+          },
+        ],
+        max_tokens: 10,
+      });
+
+      const result = response.choices[0]?.message?.content?.trim() || '';
+      // Validar que la respuesta sea 4 dígitos numéricos
+      if (/^\d{4}$/.test(result)) {
+        return result;
+      } else {
+        throw new Error(
+          'La respuesta de ChatGPT no es un número de 4 dígitos válido',
+        );
+      }
+    } catch (error) {
+      this.logger.error('Error al interpretar el CAPTCHA con ChatGPT:', error);
+      throw new Error(`Error al interpretar el CAPTCHA: ${error.message}`);
     }
   }
 }

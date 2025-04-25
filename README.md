@@ -78,6 +78,31 @@ Respuesta:
 }
 ```
 
+#### 4. Auto-Submit con GPT-4 Vision
+
+Este endpoint combina todo el proceso en un solo paso, utilizando GPT-4 Vision para interpretar automáticamente el captcha.
+
+```http
+POST /captcha/auto-submit
+Content-Type: application/json
+
+{
+    "region": "13",
+    "comuna": "13101",
+    "manzana": "12345",
+    "predio": "67890"
+}
+```
+
+Respuesta:
+
+```json
+{
+  "pdf": "base64_string",
+  "contentType": "application/pdf"
+}
+```
+
 ### Endpoints Disponibles
 
 #### 1. Obtener Nuevo Captcha
