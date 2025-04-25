@@ -38,13 +38,13 @@ export class CaptchaService {
         '--disable-gpu',
         '--window-size=1920x1080',
       ],
-      protocolTimeout: 30000, // Aumentar el timeout a 30 segundos
+      protocolTimeout: 60000, // Reducido de 300000 (5 min) a 60000 (1 min)
     });
     const page = await browser.newPage();
 
     // Configurar timeouts de navegación
-    page.setDefaultNavigationTimeout(30000);
-    page.setDefaultTimeout(30000);
+    page.setDefaultNavigationTimeout(30000); // Reducido de 60000 a 30000
+    page.setDefaultTimeout(30000); // Reducido de 60000 a 30000
 
     await page.goto('https://zeus.sii.cl/avalu_cgi/br/brc110.sh');
     const currentUrl1 = page.url();
@@ -164,165 +164,313 @@ export class CaptchaService {
 
     try {
       this.logger.log('Starting PDF generation process...');
-      // Input captcha value
-      this.logger.log('Typing captcha value...');
       await session.page.type('input[name="txt_code"]', dto.captchaValue);
-      this.logger.log('Captcha value typed successfully');
 
-      // Configurar el listener para la ventana emergente antes de hacer clic
       const popupPromise = new Promise<Buffer>((resolve, reject) => {
-        const popupHandler = (popup: puppeteer.Page | null) => {
-          void (async () => {
-            if (!popup) {
-              this.logger.error('Popup window failed to open');
-              reject(new Error('Failed to open popup window'));
-              return;
-            }
+        const popupHandler = async (popup: puppeteer.Page | null): Promise<void> => {
+          if (!popup) {
+            reject(new Error('Failed to open popup window'));
+            return;
+          }
 
-            try {
-              // Configurar timeouts para la ventana emergente
-              popup.setDefaultNavigationTimeout(30000);
-              popup.setDefaultTimeout(30000);
+          try {
+            popup.setDefaultNavigationTimeout(60000); // Reducido de 180000 a 60000
+            popup.setDefaultTimeout(60000); // Reducido de 180000 a 60000
 
-              this.logger.log('Waiting for popup to load...');
-              await popup.waitForFunction(
-                () => {
-                  return document.readyState === 'complete';
-                },
-                { timeout: 30000 },
-              );
-              this.logger.log('Popup loaded successfully');
-              await new Promise((resolve) => setTimeout(resolve, 1000));
-
-              // Verificar si hay un mensaje de error
-              const errorMessage = await popup.evaluate(() => {
-                const errorElement = document.querySelector('.error-message');
-                return errorElement ? errorElement.textContent : null;
+            this.logger.log('Waiting for popup navigation...');
+            
+            await popup
+              .waitForNavigation({
+                waitUntil: 'networkidle0',
+                timeout: 60000, // Reducido de 180000 a 60000
+              })
+              .catch(() => {
+                this.logger.log('Navigation timeout, continuing...');
               });
 
-              if (errorMessage) {
-                this.logger.error(`Error message found: ${errorMessage}`);
-                throw new Error(`SII Error: ${errorMessage}`);
+            const waitForFrames = async (maxAttempts = 5): Promise<puppeteer.Frame[]> => { // Reducido de 10 a 5 intentos
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                this.logger.log(
+                  `Frame check attempt ${attempt}/${maxAttempts}`,
+                );
+                const frames = popup.frames();
+                if (frames.length > 0) {
+                  return frames;
+                }
+                await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 1000)); // Reducido de 2000 a 1000
               }
+              return [];
+            };
 
-              // Nueva estrategia para capturar todo el contenido
-              this.logger.log('Preparing page for PDF generation...');
-              // 1. Ajustar el contenido de la página para mejor captura
-              await popup.evaluate(() => {
-                // Eliminar restricciones de tamaño y scroll
-                document.body.style.overflow = 'visible';
-                document.body.style.maxWidth = 'none';
-                document.body.style.width = 'auto';
-                // Ajustar todas las tablas para que muestren su contenido completo
-                const tables = document.getElementsByTagName('table');
-                for (const table of tables) {
-                  table.style.width = 'auto';
-                  table.style.maxWidth = 'none';
-                  table.style.tableLayout = 'auto';
+            const frames = await waitForFrames();
+            this.logger.log(`Found ${frames.length} frames`);
+
+            // Configurar interceptación de requests para capturar URLs de PDF
+            const pdfUrls = new Set<string>();
+            await popup.setRequestInterception(true);
+            popup.on('request', request => {
+              const url = request.url();
+              if (url.includes('.pdf') || url.includes('brc410.sh')) {
+                this.logger.log('Intercepted potential PDF URL:', url);
+                pdfUrls.add(url);
+              }
+              request.continue();
+            });
+
+            for (const frame of frames) {
+              try {
+                const url = frame.url();
+                this.logger.log(`Checking frame URL: ${url}`);
+
+                // Verificar si es una URL de PDF directa o una URL de brc410.sh
+                if (url.includes('.pdf') || url.includes('brc410.sh')) {
+                  this.logger.log('Found potential PDF URL in frame, attempting download...');
+                  try {
+                    const response = await session.page.evaluate(async (pdfUrl) => {
+                      const resp = await fetch(pdfUrl, {
+                        method: 'GET',
+                        credentials: 'include',  // Incluir cookies
+                        headers: {
+                          'Accept': 'application/pdf'
+                        }
+                      });
+                      if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+                      const buffer = await resp.arrayBuffer();
+                      return Array.from(new Uint8Array(buffer));
+                    }, url);
+
+                    if (response && response.length) {
+                      const pdfBuffer = Buffer.from(response);
+                      this.logger.log('PDF obtained directly from URL');
+                      resolve(pdfBuffer);
+                      return;
+                    }
+                  } catch (downloadError) {
+                    this.logger.warn('Direct download failed:', downloadError);
+                  }
                 }
-                // Asegurar que las celdas no se corten
-                const cells = document.getElementsByTagName('td');
-                for (const cell of cells) {
-                  cell.style.whiteSpace = 'normal';
-                  cell.style.width = 'auto';
+
+                // Buscar el visor de PDF o elementos relacionados
+                const viewerInfo = await frame.evaluate(() => {
+                  const elements = {
+                    pdfViewer: document.querySelector('pdf-viewer'),
+                    embed: document.querySelector('embed[type="application/pdf"]'),
+                    object: document.querySelector('object[type="application/pdf"]'),
+                    iframe: document.querySelector('iframe[src*=".pdf"], iframe[src*="brc410.sh"]'),
+                    links: Array.from(document.querySelectorAll('a[href*=".pdf"], a[href*="brc410.sh"]'))
+                  };
+
+                  return {
+                    hasPdfViewer: !!elements.pdfViewer,
+                    hasEmbed: !!elements.embed,
+                    hasObject: !!elements.object,
+                    hasIframe: !!elements.iframe,
+                    linkUrls: elements.links.map(a => (a as HTMLAnchorElement).href),
+                    embedSrc: (elements.embed as HTMLEmbedElement)?.src,
+                    objectData: (elements.object as HTMLObjectElement)?.data,
+                    iframeSrc: (elements.iframe as HTMLIFrameElement)?.src
+                  };
+                });
+
+                this.logger.log('Viewer info:', viewerInfo);
+
+                if (viewerInfo.hasPdfViewer || viewerInfo.hasEmbed || viewerInfo.hasObject || viewerInfo.hasIframe) {
+                  this.logger.log('Found PDF viewer or related elements in frame');
+                  
+                  const pdfData = await frame.evaluate(async () => {
+                    // Intentar obtener el PDF del visor
+                    const viewer = document.querySelector('pdf-viewer') as any;
+                    if (viewer?.getFileBlob) {
+                      try {
+                        const blob = await viewer.getFileBlob();
+                        return Array.from(new Uint8Array(await blob.arrayBuffer()));
+                      } catch (e) {
+                        console.error('Error getting blob from viewer:', e);
+                      }
+                    }
+
+                    // Intentar obtener el PDF de otros elementos
+                    const sources = [
+                      (document.querySelector('embed[type="application/pdf"]') as HTMLEmbedElement)?.src,
+                      (document.querySelector('object[type="application/pdf"]') as HTMLObjectElement)?.data,
+                      (document.querySelector('iframe[src*=".pdf"], iframe[src*="brc410.sh"]') as HTMLIFrameElement)?.src,
+                      ...(Array.from(document.querySelectorAll('a[href*=".pdf"], a[href*="brc410.sh"]'))
+                        .map(a => (a as HTMLAnchorElement).href))
+                    ].filter(Boolean);
+
+                    for (const source of sources) {
+                      try {
+                        const response = await fetch(source, {
+                          credentials: 'include',
+                          headers: {
+                            'Accept': 'application/pdf'
+                          }
+                        });
+                        if (response.ok) {
+                          const buffer = await response.arrayBuffer();
+                          return Array.from(new Uint8Array(buffer));
+                        }
+                      } catch (e) {
+                        console.error('Error fetching from source:', e);
+                      }
+                    }
+
+                    return null;
+                  });
+
+                  if (pdfData) {
+                    const pdfBuffer = Buffer.from(pdfData);
+                    this.logger.log('PDF obtained from viewer or related elements');
+                    resolve(pdfBuffer);
+                    return;
+                  }
                 }
-              });
 
-              // 2. Esperar a que los cambios se apliquen
-              await new Promise((resolve) => setTimeout(resolve, 1000));
+                // Si encontramos URLs en los elementos pero no pudimos obtener el PDF, intentar descargarlas
+                if (viewerInfo.linkUrls.length > 0) {
+                  for (const url of viewerInfo.linkUrls) {
+                    try {
+                      const response = await session.page.evaluate(async (pdfUrl) => {
+                        const resp = await fetch(pdfUrl, {
+                          credentials: 'include',
+                          headers: {
+                            'Accept': 'application/pdf'
+                          }
+                        });
+                        if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+                        const buffer = await resp.arrayBuffer();
+                        return Array.from(new Uint8Array(buffer));
+                      }, url);
 
-              // 3. Obtener las dimensiones reales del contenido
-              const dimensions = await popup.evaluate(() => {
-                const body = document.body;
-                const html = document.documentElement;
-
-                return {
-                  width: Math.max(
-                    body.scrollWidth,
-                    body.offsetWidth,
-                    html.clientWidth,
-                    html.scrollWidth,
-                    html.offsetWidth,
-                  ),
-                  height: Math.max(
-                    body.scrollHeight,
-                    body.offsetHeight,
-                    html.clientHeight,
-                    html.scrollHeight,
-                    html.offsetHeight,
-                  ),
-                };
-              });
-
-              // 4. Configurar viewport con las dimensiones obtenidas
-              await popup.setViewport({
-                width: dimensions.width,
-                height: dimensions.height,
-                deviceScaleFactor: 1,
-              });
-
-              this.logger.log('Generating PDF with optimized settings...');
-              const pdfData = await popup.pdf({
-                printBackground: true,
-                margin: {
-                  top: '10mm',
-                  right: '10mm',
-                  bottom: '10mm',
-                  left: '10mm',
-                },
-                width: `${dimensions.width + 20}px`, // Agregar un pequeño margen
-                height: `${dimensions.height + 20}px`,
-                scale: 0.95, // Ligera reducción para asegurar que todo quepa
-                displayHeaderFooter: false,
-                preferCSSPageSize: false,
-              });
-              // Guardar el PDF en el sistema de archivos
-              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-              const filename = `certificado_${timestamp}.pdf`;
-              const filepath = path.join(this.PDF_DIR, filename);
-              fs.writeFileSync(filepath, pdfData);
-              this.logger.log(`PDF saved to: ${filepath}`);
-              this.logger.log(`PDF size: ${pdfData.length} bytes`);
-
-              this.logger.log('PDF generated successfully');
-
-              resolve(Buffer.from(pdfData));
-            } catch (error) {
-              this.logger.error('Error in popup handler:', error);
-              reject(error instanceof Error ? error : new Error(String(error)));
-            } finally {
-              this.logger.log('Closing popup window...');
-              await popup.close();
+                      if (response && response.length) {
+                        const pdfBuffer = Buffer.from(response);
+                        this.logger.log('PDF obtained from link URL');
+                        resolve(pdfBuffer);
+                        return;
+                      }
+                    } catch (downloadError) {
+                      this.logger.warn(`Failed to download from link URL ${url}:`, downloadError);
+                    }
+                  }
+                }
+              } catch (frameError) {
+                this.logger.warn(
+                  `Error processing frame: ${frameError instanceof Error ? frameError.message : String(frameError)}`,
+                );
+                continue;
+              }
             }
-          })();
+
+            // Si no encontramos el PDF en los frames, intentar con las URLs interceptadas
+            if (pdfUrls.size > 0) {
+              this.logger.log('Attempting to download from intercepted URLs...');
+              for (const url of pdfUrls) {
+                try {
+                  const response = await session.page.evaluate(async (pdfUrl) => {
+                    const resp = await fetch(pdfUrl, {
+                      credentials: 'include',
+                      headers: {
+                        'Accept': 'application/pdf'
+                      }
+                    });
+                    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+                    const buffer = await resp.arrayBuffer();
+                    return Array.from(new Uint8Array(buffer));
+                  }, url);
+
+                  if (response && response.length) {
+                    const pdfBuffer = Buffer.from(response);
+                    this.logger.log('PDF obtained from intercepted URL');
+                    resolve(pdfBuffer);
+                    return;
+                  }
+                } catch (downloadError) {
+                  this.logger.warn(`Failed to download from intercepted URL ${url}:`, downloadError);
+                }
+              }
+            }
+
+            // Si llegamos aquí, no pudimos encontrar el PDF
+            reject(new Error('Could not find PDF content in any frame or popup'));
+          } catch (error) {
+            this.logger.error('Error in popup handler:', error);
+            try {
+              await popup.close();
+            } catch (closeError) {
+              this.logger.warn('Error closing popup after error:', closeError);
+            }
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
         };
 
         session.page.once('popup', popupHandler);
       });
 
-      // Hacer clic en el botón
       this.logger.log('Clicking submit button...');
-      await session.page.click('input[name="b1"]');
-      this.logger.log('Submit button clicked successfully');
+      let clickSuccess = false;
+      for (let attempt = 1; attempt <= 3 && !clickSuccess; attempt++) {
+        try {
+          // Wait for network idle first
+          await session.page.waitForNetworkIdle({ timeout: 15000 }).catch(() => { // Reducido de 30000 a 15000
+            this.logger.warn('Network idle timeout, continuing anyway...');
+          });
 
-      // Esperar a que se complete la operación
-      this.logger.log('Waiting for PDF generation to complete...');
+          // Try multiple selector strategies
+          const button = await Promise.race([
+            session.page.waitForSelector('input[name="b1"]', { visible: true, timeout: 15000 }), // Reducido de 30000 a 15000
+            session.page.waitForSelector('input[type="submit"]', { visible: true, timeout: 15000 }), // Reducido de 30000 a 15000
+            session.page.waitForSelector('button[type="submit"]', { visible: true, timeout: 15000 }) // Reducido de 30000 a 15000
+          ]).catch(() => null);
+
+          if (button) {
+            // Try clicking directly first
+            await button.click({ delay: 100 }).catch(async () => {
+              // If direct click fails, try JavaScript click
+              await session.page.evaluate(() => {
+                const elements = [
+                  document.querySelector('input[name="b1"]'),
+                  document.querySelector('input[type="submit"]'),
+                  document.querySelector('button[type="submit"]')
+                ] as (HTMLInputElement | HTMLButtonElement | null)[];
+                const button = elements.find(el => el);
+                if (button) (button as HTMLElement).click();
+              });
+            });
+            clickSuccess = true;
+            this.logger.log('Submit button clicked successfully');
+            break;
+          }
+
+          await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 1000)); // Reducido de 2000 a 1000
+        } catch (clickError) {
+          this.logger.warn(
+            `Click attempt ${attempt} failed:`,
+            clickError instanceof Error ? clickError.message : String(clickError),
+          );
+          if (attempt === 3) {
+            throw new Error(
+              `Failed to click submit button after ${attempt} attempts`,
+            );
+          }
+          await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 1000));
+        }
+      }
+
       const pdfBuffer = await popupPromise;
       this.logger.log('PDF generation completed successfully');
 
-      // Limpiar la sesión
-      this.logger.log('Cleaning up session...');
-      // await this.cleanupSession(session.sessionId);
-      this.logger.log('Session cleaned up successfully');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `certificado_${timestamp}.pdf`;
+      const filepath = path.join(this.PDF_DIR, filename);
+      fs.writeFileSync(filepath, pdfBuffer);
+      this.logger.log(`PDF saved to: ${filepath}`);
 
       return pdfBuffer;
     } catch (error) {
       this.logger.error('Error in PDF generation process:', error);
-      if (session) {
-        await this.cleanupSession(session.sessionId);
-      }
+      await this.cleanupSession(session.sessionId);
       throw new Error(
-        `Failed to get PDF: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        `Failed to get PDF: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -342,7 +490,7 @@ export class CaptchaService {
   async interpretCaptchaWithGPT(base64Image: string): Promise<string> {
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'gpt-4-turbo-2024-04-09',
         messages: [
           {
             role: 'user',
