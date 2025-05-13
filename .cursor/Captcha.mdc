@@ -1,0 +1,238 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+/*
+Project: Captcha Solver On-Premise
+Technologies: opencv4nodejs, tesseract.js, @tensorflow/tfjs-node
+Structure:
+  package.json
+  src/
+    index.js
+    processor.js
+    utils/
+      preprocess.js
+      segment.js
+    ocr/
+      tesseractOcr.js
+      cnnOcr.js
+  models/
+    digit_cnn/model.json  (pretrained TensorFlow.js model)
+*/
+
+// package.json
+{
+  "name": "captcha-solver",
+  "version": "1.0.0",
+  "description": "OCR pipeline for captcha images using OpenCV, Tesseract.js, and TensorFlow.js",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js ./input_images ./output_images"
+  },
+  "dependencies": {
+    "opencv4nodejs": "^6.1.0",
+    "tesseract.js": "^4.0.2",
+    "@tensorflow/tfjs-node": "^4.5.0"
+  }
+}
+
+// src/utils/preprocess.js
+const cv = require('opencv4nodejs');
+
+/**
+ * Carga la imagen y aplica preprocesamiento (gris, blur, umbral, eliminación de líneas).
+ * @param {string} imgPath
+ * @returns {{orig: cv.Mat, clean: cv.Mat}}
+ */
+function preprocessImage(imgPath) {
+  const img = cv.imread(imgPath);
+  const gray = img.bgrToGray();
+  const blur = gray.bilateralFilter(9, 75, 75);
+  const thresh = blur.adaptiveThreshold(
+    255,
+    cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+    cv.THRESH_BINARY_INV,
+    11,
+    2
+  );
+
+  // Kernel horizontal para líneas
+  const horizKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(25, 1));
+  const opened = thresh.morphologyEx(horizKernel, cv.MORPH_OPEN);
+  const clean = thresh.sub(opened);
+
+  return { orig: img, clean };
+}
+
+module.exports = { preprocessImage };
+
+
+// src/utils/segment.js
+const cv2 = require('opencv4nodejs');
+
+/**
+ * Segmentar caracteres de la imagen binarizada.
+ * @param {cv.Mat} cleanMat
+ * @returns {cv.Mat[]} Array de recortes 28×28 de cada carácter.
+ */
+function segmentCharacters(cleanMat) {
+  const contours = cleanMat.findContours(cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE);
+  const rois = [];
+
+  for (const cnt of contours) {
+    const rect = cnt.boundingRect();
+    const { x, y, w, h } = rect;
+    if (h > 20 && w > 10 && w / h < 1.0 && w / h > 0.2) {
+      const roi = cleanMat.getRegion(new cv2.Rect(x, y, w, h)).resize(28, 28);
+      rois.push({ x, roi });
+    }
+  }
+
+  // Ordenar izquierda→derecha y devolver solo Mats
+  return rois.sort((a, b) => a.x - b.x).map(item => item.roi);
+}
+
+module.exports = { segmentCharacters };
+
+
+// src/ocr/tesseractOcr.js
+const { createWorker } = require('tesseract.js');
+
+/**
+ * OCR rápido con Tesseract.js. Devuelve 4 dígitos o null.
+ * @param {string} imgPath
+ * @returns {Promise<string|null>}
+ */
+async function quickOcr(imgPath) {
+  const worker = createWorker();
+  await worker.load();
+  await worker.loadLanguage('eng');
+  await worker.initialize('eng');
+
+  const { data: { text } } = await worker.recognize(imgPath, {
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode: 7
+  });
+
+  await worker.terminate();
+  const digits = text.replace(/\D/g, '');
+  return digits.length === 4 ? digits : null;
+}
+
+module.exports = { quickOcr };
+
+
+// src/ocr/cnnOcr.js
+const tf = require('@tensorflow/tfjs-node');
+const path = require('path');
+const cv = require('opencv4nodejs');
+
+let digitModel = null;
+
+/**
+ * Carga el modelo TensorFlow.js de fallback.
+ */
+async function loadModel() {
+  if (!digitModel) {
+    const modelPath = 'file://' + path.resolve(__dirname, '../models/digit_cnn/model.json');
+    digitModel = await tf.loadLayersModel(modelPath);
+  }
+}
+
+/**
+ * Convierte un cv.Mat 28×28 a tensor 1×28×28×1.
+ */
+function matToTensor(mat) {
+  const png = cv.imencode('.png', mat); // Buffer PNG
+  let imgTensor = tf.node.decodePng(png, 1);
+  imgTensor = imgTensor.reshape([1, 28, 28, 1]).toFloat().div(255.0);
+  return imgTensor;
+}
+
+/**
+ * OCR de fallback usando el modelo CNN entrenado.
+ * @param {cv.Mat[]} rois Array de Mats 28×28
+ * @returns {Promise<string|null>} 4 dígitos o null
+ */
+async function fallbackOcr(rois) {
+  await loadModel();
+  let result = '';
+
+  for (const mat of rois) {
+    const tensor = matToTensor(mat);
+    const pred = digitModel.predict(tensor);
+    const digit = pred.argMax(-1).dataSync()[0];
+    result += digit.toString();
+  }
+  return result.length === 4 ? result : null;
+}
+
+module.exports = { fallbackOcr };
+
+
+// src/processor.js
+const path = require('path');
+const { preprocessImage } = require('./utils/preprocess');
+const { segmentCharacters } = require('./utils/segment');
+const { quickOcr } = require('./ocr/tesseractOcr');
+const { fallbackOcr } = require('./ocr/cnnOcr');
+
+/**
+ * Aplica pipeline completo: preprocess, quickOcr, fallbackOcr.
+ * @param {string} imgPath
+ * @returns {Promise<string>} 4 dígitos reconocidos
+ */
+async function solveCaptcha(imgPath) {
+  const { clean } = preprocessImage(imgPath);
+  const rois = segmentCharacters(clean);
+
+  let digits = await quickOcr(imgPath);
+  if (digits) return digits;
+
+  digits = await fallbackOcr(rois);
+  if (digits) return digits;
+
+  throw new Error(`No se pudieron extraer 4 dígitos de ${path.basename(imgPath)}`);
+}
+
+module.exports = { solveCaptcha };
+
+
+// src/index.js
+const fs = require('fs');
+const path = require('path');
+const { solveCaptcha } = require('./processor');
+
+/**
+ * Procesa todas las imágenes de inputDir y las copia a outputDir renombradas.
+ * @param {string} inputDir
+ * @param {string} outputDir
+ */
+async function processDirectory(inputDir, outputDir) {
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+  const files = fs.readdirSync(inputDir).filter(f => /\.(jpg|jpeg|png)$/i.test(f));
+
+  for (const file of files) {
+    const inputPath = path.join(inputDir, file);
+    try {
+      const digits = await solveCaptcha(inputPath);
+      const ext = path.extname(file);
+      const outName = `${digits}${ext}`;
+      fs.copyFileSync(inputPath, path.join(outputDir, outName));
+      console.log(`[OK] ${file} → ${outName}`);
+    } catch (err) {
+      console.error(`[ERROR] ${file}: ${err.message}`);
+    }
+  }
+}
+
+// CLI
+const [,, inputDir, outputDir] = process.argv;
+if (!inputDir || !outputDir) {
+  console.error('Uso: node src/index.js <inputDir> <outputDir>');
+  process.exit(1);
+}
+
+processDirectory(inputDir, outputDir);
